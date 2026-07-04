@@ -49,28 +49,50 @@ class TurnResult(BaseModel):
     booking: dict
 
 
-def _merge(booking: Booking, ext: TurnExtract) -> list[str]:
-    """Copy extracted fields onto the booking. Returns which fields changed."""
+def _pretty(value: object) -> str:
+    if isinstance(value, time):
+        return value.strftime("%H:%M")
+    if isinstance(value, date):
+        return value.strftime("%A %B %-d")
+    return str(value)
+
+
+def _merge(booking: Booking, ext: TurnExtract) -> tuple[list[str], list[str]]:
+    """Copy extracted fields onto the booking. The extractor's strings are untrusted
+    input: a date like 2026-02-30 must be rejected here, not crash the turn. Returns
+    (notes for fields that changed from one value to another, values that do not exist
+    and were not applied)."""
     updates: dict[str, object] = {}
+    impossible: list[str] = []
     if ext.service:
         updates["service"] = ext.service
     if ext.barber:
         updates["barber"] = ext.barber
     if ext.day:
-        updates["day"] = date.fromisoformat(ext.day)
+        try:
+            updates["day"] = date.fromisoformat(ext.day)
+        except ValueError:
+            impossible.append(f"the date '{ext.day}' does not exist")
     if ext.time:
-        hh, mm = ext.time.split(":")
-        updates["start"] = time(int(hh), int(mm))
+        try:
+            hh, mm = ext.time.split(":")
+            updates["start"] = time(int(hh), int(mm))
+        except ValueError:
+            impossible.append(f"the time '{ext.time}' does not exist")
     if ext.name:
         updates["name"] = ext.name
     if ext.phone:
         updates["phone"] = ext.phone
-    changed = []
+    changes = []
+    labels = {"day": "date", "start": "time"}
     for field_name, value in updates.items():
-        if getattr(booking, field_name) != value:
+        old = getattr(booking, field_name)
+        if old != value:
             setattr(booking, field_name, value)
-            changed.append(field_name)
-    return changed
+            if old is not None:
+                label = labels.get(field_name, field_name)
+                changes.append(f"{label} changed from {_pretty(old)} to {_pretty(value)}")
+    return changes, impossible
 
 
 def _situation_for_booking(session: Session, now: datetime) -> str:
@@ -209,12 +231,21 @@ def _dispatch(
         return "They rejected the summary. Ask what they would like to change."
 
     if ext.intent in ("booking_info", "confirm", "deny"):
-        _merge(booking, ext)
+        changes, impossible = _merge(booking, ext)
         if booking.name is None and profile.get("name"):
             booking.name = profile["name"]
         if booking.phone is None and profile.get("phone"):
             booking.phone = profile["phone"]
-        return _situation_for_booking(session, now)
+        prefix = ""
+        if impossible:
+            prefix += (
+                "They gave a value that does not exist ("
+                + "; ".join(impossible)
+                + "). Point that out and ask for a real one. "
+            )
+        if changes:
+            prefix += "They changed their mind: " + "; ".join(changes) + ". Acknowledge that. "
+        return prefix + _situation_for_booking(session, now)
 
     # unrelated chatter: leave the booking untouched, steer back if one is pending
     if session.state in ("collecting", "confirming"):
