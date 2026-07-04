@@ -5,6 +5,8 @@ Makes real LLM calls; a full run takes a few minutes."""
 
 import sys
 
+from pydantic_ai.exceptions import ModelHTTPError
+
 from evals.harness import run_scenario
 from evals.scenarios import SCENARIOS
 
@@ -15,7 +17,13 @@ def main() -> int:
 
     results = []
     for i, scenario in enumerate(chosen):
-        ok, details, _ = run_scenario(scenario, i)
+        try:
+            ok, details, _ = run_scenario(scenario, i)
+        except ModelHTTPError:
+            # a 503 demand spike outlasted the per-call retries; one fresh attempt
+            # for the whole scenario before letting the run die
+            print(f"[retry] {scenario.name}: transient model error, rerunning")
+            ok, details, _ = run_scenario(scenario, i)
         results.append((scenario, ok))
         marker = "PASS" if ok else "FAIL"
         print(f"[{marker}] {scenario.name}")
