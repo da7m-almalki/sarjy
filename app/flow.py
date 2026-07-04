@@ -1,0 +1,229 @@
+"""The orchestrator: a state machine that owns the booking, all validation, and
+every side effect. LLMs extract and verbalize; this module decides.
+
+Per turn: extract the user's message into a TurnExtract, apply it to the session
+(merge fields, switch states), re-validate the whole booking against real
+availability, perform any side effect (create or cancel a calendar event), then
+hand converse a plain-language situation report to say out loud.
+
+Calendar access and the clock are injected (module attributes) so the eval suite
+can run against a fake calendar at a frozen time."""
+
+from dataclasses import dataclass, field
+from datetime import date, datetime, time
+
+from pydantic import BaseModel
+from pydantic_ai.messages import ModelMessage
+
+from app import calendar_client, memory
+from app.booking import Booking, validate
+from app.llm import ConverseDeps, TurnExtract, converse, extract, run_with_retry
+from app.shop import TZ
+
+# injection points, replaced by the eval suite
+busy_lookup = lambda barber, start, end: calendar_client.busy_blocks(  # noqa: E731
+    calendar_client.BARBERS[barber], start, end
+)
+create_event = calendar_client.create_event
+delete_event = calendar_client.delete_event
+availability_provider = calendar_client.availability_text
+now_provider = lambda: datetime.now(TZ)  # noqa: E731
+
+HISTORY_LIMIT = 40
+
+
+@dataclass
+class Session:
+    state: str = "chatting"  # chatting | collecting | confirming | cancelling
+    booking: Booking = field(default_factory=Booking)
+    cancel_candidate: dict | None = None
+    history: list[ModelMessage] = field(default_factory=list)
+
+
+_sessions: dict[str, Session] = {}
+
+
+class TurnResult(BaseModel):
+    reply: str
+    state: str
+    booking: dict
+
+
+def _merge(booking: Booking, ext: TurnExtract) -> list[str]:
+    """Copy extracted fields onto the booking. Returns which fields changed."""
+    updates: dict[str, object] = {}
+    if ext.service:
+        updates["service"] = ext.service
+    if ext.barber:
+        updates["barber"] = ext.barber
+    if ext.day:
+        updates["day"] = date.fromisoformat(ext.day)
+    if ext.time:
+        hh, mm = ext.time.split(":")
+        updates["start"] = time(int(hh), int(mm))
+    if ext.name:
+        updates["name"] = ext.name
+    if ext.phone:
+        updates["phone"] = ext.phone
+    changed = []
+    for field_name, value in updates.items():
+        if getattr(booking, field_name) != value:
+            setattr(booking, field_name, value)
+            changed.append(field_name)
+    return changed
+
+
+def _situation_for_booking(session: Session, now: datetime) -> str:
+    """Validate the current booking and produce the ground-truth situation text."""
+    booking = session.booking
+    problem = validate(booking, busy_lookup, now)
+    if problem:
+        text = f"Problem with the booking ({booking.summary()}): {problem.detail}"
+        if problem.alternatives:
+            text += " Free alternatives: " + "; ".join(problem.alternatives) + "."
+        text += " Ask the customer how to proceed."
+        session.state = "collecting"
+        return text
+    missing = booking.missing()
+    if missing:
+        session.state = "collecting"
+        pretty = {"day": "date", "start": "time"}
+        asks = ", ".join(pretty.get(m, m) for m in missing)
+        return (
+            f"Booking so far: {booking.summary()}. Everything stated is valid and the "
+            f"slot is free so far. Still needed: {asks}. Ask for the next one naturally."
+        )
+    session.state = "confirming"
+    return (
+        f"All details collected and the slot is confirmed free: {booking.summary()}, "
+        f"phone {booking.phone}. Read the summary back and ask them to confirm."
+    )
+
+
+def handle_turn(device_id: str, text: str) -> TurnResult:
+    now = now_provider()
+    session = _sessions.setdefault(device_id, Session())
+    profile = memory.get_profile(device_id)
+
+    context = (
+        f"Current date and time: {now.strftime('%A %Y-%m-%d %H:%M')} (Riyadh).\n"
+        f"Conversation state: {session.state}. Booking so far: {session.booking.summary()}.\n"
+        f"User message: {text}"
+    )
+    ext: TurnExtract = run_with_retry(extract, context).output
+
+    # persist memory-worthy details regardless of the flow
+    memory.update_profile(
+        device_id,
+        name=ext.name or "",
+        phone=ext.phone or "",
+        preferred_barber=ext.preferred_barber or "",
+    )
+    if ext.facts:
+        memory.add_facts(device_id, ext.facts)
+
+    situation = _dispatch(session, ext, device_id, profile, now)
+
+    deps = ConverseDeps(
+        profile=memory.get_profile(device_id),
+        facts=memory.get_facts(device_id),
+        situation=situation,
+    )
+    result = run_with_retry(converse, text, deps=deps, message_history=session.history)
+    session.history = result.all_messages()[-HISTORY_LIMIT:]
+
+    return TurnResult(
+        reply=result.output,
+        state=session.state,
+        booking=session.booking.model_dump(mode="json"),
+    )
+
+
+def _dispatch(
+    session: Session, ext: TurnExtract, device_id: str, profile: dict, now: datetime
+) -> str:
+    booking = session.booking
+
+    if ext.intent == "abandon" and session.state in ("collecting", "confirming"):
+        session.booking = Booking()
+        session.state = "chatting"
+        return "The customer called off the booking. Confirm it is discarded, no hard feelings."
+
+    if session.state == "cancelling":
+        # a repeated "cancel it" while we are asking IS the confirmation
+        if ext.intent in ("confirm", "cancel_existing") and session.cancel_candidate:
+            target = session.cancel_candidate
+            delete_event(target["barber"], target["event_id"])
+            memory.cancel_booking(target["id"])
+            session.cancel_candidate = None
+            session.state = "chatting"
+            return "DONE: the booking is cancelled and removed from the calendar. Confirm that."
+        if ext.intent == "deny":
+            session.cancel_candidate = None
+            session.state = "chatting"
+            return "They decided to keep the booking. Acknowledge."
+
+    if ext.intent == "cancel_existing":
+        upcoming = memory.upcoming_bookings(device_id, now.isoformat())
+        if not upcoming:
+            session.state = "chatting"
+            return "They want to cancel, but they have no upcoming bookings on record. Say so."
+        target = upcoming[0]
+        session.cancel_candidate = target
+        session.state = "cancelling"
+        start = datetime.fromisoformat(target["start_iso"])
+        return (
+            f"They want to cancel. Found their booking: {target['service']} with "
+            f"{target['barber']} on {start.strftime('%A %B %-d at %H:%M')}. "
+            "NOT cancelled yet: ask them to confirm cancelling it."
+        )
+
+    if session.state == "confirming" and ext.intent == "confirm":
+        problem = validate(booking, busy_lookup, now)
+        if problem is None and not booking.missing():
+            start_at = booking.start_dt()
+            assert start_at is not None and booking.minutes is not None
+            assert booking.barber and booking.service and booking.name and booking.phone
+            event_id = create_event(
+                booking.barber,
+                start_at,
+                booking.minutes,
+                summary=f"{booking.service}: {booking.name}",
+                description=f"Booked by Sarjy. Phone: {booking.phone}",
+            )
+            memory.add_booking(
+                device_id, booking.barber, booking.service, start_at.isoformat(), event_id
+            )
+            memory.update_profile(device_id, last_service=booking.service)
+            done = booking.summary()
+            session.booking = Booking()
+            session.state = "chatting"
+            return (
+                f"BOOKED. The appointment ({done}) is now on the calendar. "
+                "Confirm it warmly and briefly."
+            )
+        # something changed under us (or a field was invalidated): fall through to re-validate
+
+    if session.state == "confirming" and ext.intent == "deny":
+        session.state = "collecting"
+        return "They rejected the summary. Ask what they would like to change."
+
+    if ext.intent in ("booking_info", "confirm", "deny"):
+        _merge(booking, ext)
+        if booking.name is None and profile.get("name"):
+            booking.name = profile["name"]
+        if booking.phone is None and profile.get("phone"):
+            booking.phone = profile["phone"]
+        return _situation_for_booking(session, now)
+
+    # unrelated chatter: leave the booking untouched, steer back if one is pending
+    if session.state in ("collecting", "confirming"):
+        return (
+            "Off-topic question mid-booking. Answer it from what you know, then steer "
+            f"back to the booking ({session.booking.summary()}, still needs "
+            f"{', '.join(session.booking.missing()) or 'confirmation'})."
+        )
+    return (
+        "Ordinary conversation. Help them, and mention you can book appointments. "
+        f"Live availability if asked: {availability_provider()}"
+    )
