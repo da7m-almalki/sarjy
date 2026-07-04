@@ -9,6 +9,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel
 from pydantic_ai import Agent, NativeOutput, RunContext
+from pydantic_ai.capabilities import Thinking
 from pydantic_ai.exceptions import ModelHTTPError
 
 from app.config import settings
@@ -40,7 +41,10 @@ class ConverseDeps:
     situation: str = ""
 
 
-converse = Agent(settings.llm_model, deps_type=ConverseDeps)
+# converse only verbalizes a situation the state machine already decided; with the
+# default dynamic thinking, ~90% of its output tokens went to deliberation it has
+# no use for. The extractor keeps dynamic thinking (date math, intent judgment).
+converse = Agent(settings.llm_model, deps_type=ConverseDeps, capabilities=[Thinking("minimal")])
 
 
 @converse.instructions

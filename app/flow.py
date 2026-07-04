@@ -138,7 +138,8 @@ def _situation_for_booking(session: Session, now: datetime) -> str:
     session.state = "confirming"
     return (
         f"All details collected and the slot is confirmed free: {booking.summary()}, "
-        f"phone {booking.phone}. Read the summary back and ask them to confirm."
+        f"phone {booking.phone}. NOT booked yet: read the summary back and ask them to "
+        "confirm, without wording that suggests it is already booked."
     )
 
 
