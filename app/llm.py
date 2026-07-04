@@ -19,13 +19,14 @@ RETRYABLE = (429, 503)
 
 
 def run_with_retry(agent: "Agent[Any, Any]", prompt: str, **kwargs: Any) -> Any:
-    """One retry on Gemini's transient errors, then give up loudly."""
-    for attempt in (1, 2):
+    """Retry Gemini's transient errors with growing pauses, then give up loudly.
+    503 demand spikes can outlast a single quick retry."""
+    for pause in (1.5, 4.0, None):
         try:
             return agent.run_sync(prompt, **kwargs)
         except ModelHTTPError as e:
-            if e.status_code in RETRYABLE and attempt == 1:
-                time_module.sleep(1.5)
+            if e.status_code in RETRYABLE and pause is not None:
+                time_module.sleep(pause)
                 continue
             raise
     raise AssertionError("unreachable")
