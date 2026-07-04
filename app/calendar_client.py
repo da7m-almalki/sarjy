@@ -44,6 +44,32 @@ def busy_blocks(
     ]
 
 
+def create_event(
+    barber: str, start: datetime, minutes: int, summary: str, description: str = ""
+) -> str:
+    """Create the booking on the barber's calendar. Returns the event id."""
+    end = start + timedelta(minutes=minutes)
+    event = (
+        _service()
+        .events()
+        .insert(
+            calendarId=BARBERS[barber],
+            body={
+                "summary": summary,
+                "description": description,
+                "start": {"dateTime": start.isoformat()},
+                "end": {"dateTime": end.isoformat()},
+            },
+        )
+        .execute()
+    )
+    return event["id"]
+
+
+def delete_event(barber: str, event_id: str) -> None:
+    _service().events().delete(calendarId=BARBERS[barber], eventId=event_id).execute()
+
+
 def next_free_slot(barber: str, minutes: int, now: datetime | None = None) -> datetime | None:
     """First gap today that fits `minutes` within opening hours, or None if none left."""
     now = now or datetime.now(TZ)
