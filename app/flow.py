@@ -10,13 +10,13 @@ Calendar access and the clock are injected (module attributes) so the eval suite
 can run against a fake calendar at a frozen time."""
 
 from dataclasses import dataclass, field
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 
 from pydantic import BaseModel
 from pydantic_ai.messages import ModelMessage
 
 from app import calendar_client, memory
-from app.booking import Booking, validate
+from app.booking import Booking, BusyLookup, validate
 from app.llm import ConverseDeps, TurnExtract, converse, extract, run_with_retry
 from app.shop import TZ
 
@@ -37,6 +37,7 @@ class Session:
     state: str = "chatting"  # chatting | collecting | confirming | cancelling
     booking: Booking = field(default_factory=Booking)
     cancel_candidate: dict | None = None
+    reschedule_target: dict | None = None  # the old booking row while moving it
     history: list[ModelMessage] = field(default_factory=list)
 
 
@@ -95,10 +96,29 @@ def _merge(booking: Booking, ext: TurnExtract) -> tuple[list[str], list[str]]:
     return changes, impossible
 
 
+def _busy_for(session: Session) -> BusyLookup:
+    """The busy lookup to validate against. While moving an existing appointment, its
+    own calendar block must not count as taken, or a move overlapping the old slot
+    would be refused because of the very event being moved."""
+    target = session.reschedule_target
+    if target is None:
+        return busy_lookup
+    old_start = datetime.fromisoformat(target["start_iso"])
+    old_end = old_start + timedelta(minutes=Booking(service=target["service"]).minutes or 30)
+
+    def lookup(barber: str, start: datetime, end: datetime) -> list[tuple[datetime, datetime]]:
+        blocks = busy_lookup(barber, start, end)
+        if barber == target["barber"]:
+            blocks = [b for b in blocks if not (b[0] == old_start and b[1] == old_end)]
+        return blocks
+
+    return lookup
+
+
 def _situation_for_booking(session: Session, now: datetime) -> str:
     """Validate the current booking and produce the ground-truth situation text."""
     booking = session.booking
-    problem = validate(booking, busy_lookup, now)
+    problem = validate(booking, _busy_for(session), now)
     if problem:
         text = f"Problem with the booking ({booking.summary()}): {problem.detail}"
         if problem.alternatives:
@@ -169,6 +189,9 @@ def _dispatch(
     if ext.intent == "abandon" and session.state in ("collecting", "confirming"):
         session.booking = Booking()
         session.state = "chatting"
+        if session.reschedule_target:
+            session.reschedule_target = None
+            return "They called off the move. The original appointment stays as it was. Confirm."
         return "The customer called off the booking. Confirm it is discarded, no hard feelings."
 
     if session.state == "cancelling":
@@ -179,6 +202,7 @@ def _dispatch(
             memory.cancel_booking(target["id"])
             session.cancel_candidate = None
             session.state = "chatting"
+            session.booking = Booking()
             return "DONE: the booking is cancelled and removed from the calendar. Confirm that."
         if ext.intent == "deny":
             session.cancel_candidate = None
@@ -186,6 +210,9 @@ def _dispatch(
             return "They decided to keep the booking. Acknowledge."
 
     if ext.intent == "cancel_existing":
+        if session.reschedule_target:  # cancelling outright supersedes the move
+            session.reschedule_target = None
+            session.booking = Booking()
         upcoming = memory.upcoming_bookings(device_id, now.isoformat())
         if not upcoming:
             session.state = "chatting"
@@ -200,8 +227,40 @@ def _dispatch(
             "NOT cancelled yet: ask them to confirm cancelling it."
         )
 
+    if ext.intent == "reschedule":
+        upcoming = memory.upcoming_bookings(device_id, now.isoformat())
+        if not upcoming:
+            session.state = "chatting"
+            return "They want to move a booking, but they have no upcoming bookings on record."
+        target = upcoming[0]
+        session.reschedule_target = target
+        old_start = datetime.fromisoformat(target["start_iso"])
+        session.booking = Booking(
+            service=target["service"],
+            barber=target["barber"],
+            day=old_start.date(),
+            start=old_start.time(),
+            name=profile.get("name") or None,
+            phone=profile.get("phone") or None,
+        )
+        changes, impossible = _merge(session.booking, ext)
+        if not changes:  # no new day or time given yet: ask instead of re-proposing the old one
+            session.booking.start = None
+        prefix = (
+            f"They are moving their existing {target['service']} with {target['barber']} "
+            f"on {old_start.strftime('%A %B %-d at %H:%M')}. The old appointment stays "
+            "until they confirm a new slot. "
+        )
+        if impossible:
+            prefix += (
+                "They gave a value that does not exist ("
+                + "; ".join(impossible)
+                + "). Point that out and ask for a real one. "
+            )
+        return prefix + _situation_for_booking(session, now)
+
     if session.state == "confirming" and ext.intent == "confirm":
-        problem = validate(booking, busy_lookup, now)
+        problem = validate(booking, _busy_for(session), now)
         if problem is None and not booking.missing():
             start_at = booking.start_dt()
             assert start_at is not None and booking.minutes is not None
@@ -220,6 +279,15 @@ def _dispatch(
             done = booking.summary()
             session.booking = Booking()
             session.state = "chatting"
+            old = session.reschedule_target
+            if old:  # the new slot exists now, so removing the old one cannot strand them
+                delete_event(old["barber"], old["event_id"])
+                memory.cancel_booking(old["id"])
+                session.reschedule_target = None
+                return (
+                    f"MOVED. The appointment is now {done} and the old slot is off the "
+                    "calendar. Confirm it warmly and briefly."
+                )
             return (
                 f"BOOKED. The appointment ({done}) is now on the calendar. "
                 "Confirm it warmly and briefly."

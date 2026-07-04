@@ -147,4 +147,25 @@ SCENARIOS = [
         ],
         expect=Expect(created=1, deleted=1, final_state="chatting"),
     ),
+    # ---- reschedule an existing booking: new event created, old one deleted
+    Scenario(
+        name="reschedule moves the booking",
+        recovery=True,
+        pre_turns=[
+            "khalid, 0501234567, haircut with Ali tomorrow at 5pm",
+            "yes book it",
+        ],
+        turns=[
+            "can i move my appointment to 8pm instead?",
+            "yes",
+        ],
+        expect=Expect(
+            created=2,
+            created_start="2026-07-05T20:00",
+            created_barber="Ali",
+            deleted=1,
+            final_state="chatting",
+            booking_discarded=True,
+        ),
+    ),
 ]

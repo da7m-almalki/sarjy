@@ -78,6 +78,7 @@ class TurnExtract(BaseModel):
         "deny",  # user rejects what was just proposed
         "abandon",  # user gives up on the booking in progress
         "cancel_existing",  # user wants to cancel an already made booking
+        "reschedule",  # user wants to move an already made booking
         "unrelated",  # anything else: questions, chit chat
     ]
     service: Literal["haircut", "beard trim", "haircut and beard", "kids cut"] | None = None
@@ -105,8 +106,11 @@ extract = Agent(
         "Times become 24h HH:MM; assume PM for ambiguous small hours like 'at 5'. "
         "intent rules: booking_info when they provide or change any booking detail or ask "
         "to book; confirm/deny only as answers to a proposal; abandon when they call off "
-        "the booking in progress; cancel_existing when they want to cancel or move an "
-        "appointment they already made; unrelated otherwise. "
+        "the booking in progress; cancel_existing when they want to cancel an appointment "
+        "they already finished booking; reschedule when they want to move or change an "
+        "appointment they already finished booking (changing a detail of the booking still "
+        "being put together is booking_info, not reschedule), and a reschedule message often "
+        "carries the new day or time, so fill those fields too; unrelated otherwise. "
         "Memory: set preferred_barber only on an explicit stated preference, never from a "
         "question or one booking. facts collects durable personal details worth remembering "
         "for future visits, as short third-person statements like 'favorite color is blue'. "
