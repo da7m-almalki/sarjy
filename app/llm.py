@@ -39,6 +39,8 @@ def run_with_retry(agent: "Agent[Any, Any]", prompt: str, **kwargs: Any) -> Any:
 class ConverseDeps:
     profile: dict[str, str] = field(default_factory=dict)
     facts: list[str] = field(default_factory=list)
+    availability: str = ""  # live, Python-computed, every turn
+    appointments: str = ""  # this customer's upcoming bookings, from the database
     situation: str = ""
 
 
@@ -58,9 +60,15 @@ def converse_instructions(ctx: RunContext[ConverseDeps]) -> str:
         "faithfully: never contradict it, never invent availability, and never say a "
         "booking or cancellation is done unless the SITUATION explicitly says it is done. "
         "If it says something is not done yet, your reply must not claim it happened. "
-        "If it lists alternatives, offer them.",
+        "If it lists alternatives, offer them. "
+        "You can only book, move, or cancel appointments; never promise emails, texts, "
+        "callbacks, or anything else you cannot actually do.",
         menu_text(),
     ]
+    if ctx.deps.availability:
+        parts.append(f"Live availability right now: {ctx.deps.availability}")
+    if ctx.deps.appointments:
+        parts.append(f"This customer's upcoming appointments: {ctx.deps.appointments}")
     if ctx.deps.situation:
         parts.append(f"SITUATION: {ctx.deps.situation}")
     if ctx.deps.profile:
@@ -106,6 +114,10 @@ extract = Agent(
         "user is stating or changing what they want booked. A QUESTION about a service, "
         "barber, price, duration, or availability fills nothing and is intent=unrelated "
         "('how long does a beard trim take?' changes no fields). "
+        "Exception: a question probing ONE specific slot ('is 6pm free tomorrow?', 'can Ali "
+        "do 5 on Monday?') is a tentative proposal: fill those fields, intent=booking_info, "
+        "the system will answer honestly whether it is free. Open availability questions "
+        "('when is Ali free?') still fill nothing. "
         "The context may include the assistant's last reply, exactly what the customer just "
         "heard. Use it ONLY to resolve what the user points at: 'the first one', 'the Salem "
         "one', 'the earlier one' fill the barber and time of that option, in the order the "

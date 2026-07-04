@@ -51,6 +51,10 @@ class TurnResult(BaseModel):
     booking: dict
 
 
+def _carries_fields(ext: TurnExtract) -> bool:
+    return any([ext.service, ext.barber, ext.day, ext.time, ext.name, ext.phone])
+
+
 def _pretty(value: object) -> str:
     if isinstance(value, time):
         return value.strftime("%H:%M")
@@ -172,9 +176,20 @@ def handle_turn(device_id: str, text: str) -> TurnResult:
 
     situation = _dispatch(session, ext, device_id, profile, now)
 
+    # the facts frame: what is true right now, rebuilt every turn AFTER any side
+    # effect, so a booking made this turn is already in it. Branch situations carry
+    # only what happened; facts never route through branches.
+    upcoming = memory.upcoming_bookings(device_id, now.isoformat())
+    appointments = "; ".join(
+        f"{b['service']} with {b['barber']} on "
+        f"{datetime.fromisoformat(b['start_iso']).strftime('%A %B %-d at %H:%M')}"
+        for b in upcoming
+    )
     deps = ConverseDeps(
         profile=memory.get_profile(device_id),
         facts=memory.get_facts(device_id),
+        availability=availability_provider(),
+        appointments=appointments or "none",
         situation=situation,
     )
     result = run_with_retry(converse, text, deps=deps, message_history=session.history)
@@ -301,9 +316,20 @@ def _dispatch(
             )
         # something changed under us (or a field was invalidated): fall through to re-validate
 
-    if session.state == "confirming" and ext.intent == "deny":
+    # a bare "no" rejects the summary; "no, make it 6 instead" carries the
+    # correction, so it falls through and gets merged like any change
+    if session.state == "confirming" and ext.intent == "deny" and not _carries_fields(ext):
         session.state = "collecting"
         return "They rejected the summary. Ask what they would like to change."
+
+    if (
+        session.state == "chatting"
+        and ext.intent in ("confirm", "deny")
+        and not _carries_fields(ext)
+    ):
+        # a stray "yes" or "thanks, yeah" with nothing on the table is not the
+        # start of a booking interrogation
+        return "Ordinary conversation. Help them, and mention you can book appointments."
 
     if ext.intent in ("booking_info", "confirm", "deny"):
         changes, impossible = _merge(booking, ext)
@@ -329,7 +355,4 @@ def _dispatch(
             f"back to the booking ({session.booking.summary()}, still needs "
             f"{', '.join(session.booking.missing()) or 'confirmation'})."
         )
-    return (
-        "Ordinary conversation. Help them, and mention you can book appointments. "
-        f"Live availability if asked: {availability_provider()}"
-    )
+    return "Ordinary conversation. Help them, and mention you can book appointments."
