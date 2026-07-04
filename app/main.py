@@ -1,24 +1,19 @@
+import logging
 from pathlib import Path
 
 import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
-from pydantic_ai.messages import ModelMessage
 
-from app import memory
-from app.calendar_client import availability_text
+from app import flow
 from app.config import settings
-from app.llm import ConverseDeps, converse, memory_extract
 from app.shop import BARBERS
 
 app = FastAPI(title="Sarjy")
+log = logging.getLogger("sarjy")
 
 STATIC = Path(__file__).parent.parent / "static"
-
-# per-process conversation history; cross-session memory lives in SQLite
-_histories: dict[str, list[ModelMessage]] = {}
-HISTORY_LIMIT = 40
 
 
 class ChatRequest(BaseModel):
@@ -28,6 +23,8 @@ class ChatRequest(BaseModel):
 
 class ChatResponse(BaseModel):
     reply: str
+    state: str = "chatting"
+    booking: dict = {}
 
 
 @app.get("/")
@@ -42,27 +39,15 @@ def meta() -> dict:
 
 @app.post("/chat")
 def chat(req: ChatRequest) -> ChatResponse:
-    deps = ConverseDeps(
-        profile=memory.get_profile(req.device_id),
-        facts=memory.get_facts(req.device_id),
-        availability=availability_text(),
-    )
-    history = _histories.get(req.device_id, [])
-
-    result = converse.run_sync(req.text, deps=deps, message_history=history)
-    _histories[req.device_id] = result.all_messages()[-HISTORY_LIMIT:]
-
-    update = memory_extract.run_sync(req.text).output
-    memory.update_profile(
-        req.device_id,
-        name=update.name or "",
-        phone=update.phone or "",
-        preferred_barber=update.preferred_barber or "",
-    )
-    if update.facts:
-        memory.add_facts(req.device_id, update.facts)
-
-    return ChatResponse(reply=result.output)
+    try:
+        result = flow.handle_turn(req.device_id, req.text)
+    except Exception:
+        # LLM or calendar hiccup: reply something speakable instead of a raw 500
+        log.exception("turn failed")
+        return ChatResponse(
+            reply="Sorry, I hit a snag on my end. Give me a second and say that again."
+        )
+    return ChatResponse(reply=result.reply, state=result.state, booking=result.booking)
 
 
 @app.get("/tts")
