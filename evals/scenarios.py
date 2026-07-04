@@ -111,6 +111,20 @@ SCENARIOS = [
         ],
         expect=Expect(created=1, created_start="2026-07-05T17:00", created_barber="Salem"),
     ),
+    # ---- picking an offered alternative by reference, not by restating it
+    Scenario(
+        name="picks an alternative by reference",
+        recovery=True,
+        busy=_busy({"Ali": [("2026-07-05 17:00", "2026-07-05 17:30")]}),
+        turns=[
+            "khalid, 0501234567, haircut with Ali tomorrow at 5pm",
+            "the first one",
+            "yes",
+        ],
+        # alternatives are computed nearest-first; 16:45 does not fit a 30 minute
+        # haircut before the 17:00 block, so: Ali 16:30, Ali 17:30, Salem 17:00
+        expect=Expect(created=1, created_start="2026-07-05T16:30", created_barber="Ali"),
+    ),
     # ---- detours never lose collected state
     Scenario(
         name="detour keeps state",
