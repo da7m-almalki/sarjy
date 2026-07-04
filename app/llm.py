@@ -1,21 +1,43 @@
-"""The two LLM roles. Converse talks to the user; the memory extractor silently
-pulls out details worth remembering. Neither one touches the calendar or the database."""
+"""The two LLM roles per turn. The extractor reads the user's message into a typed
+object (booking fields, intent, memory-worthy details). Converse turns the state
+machine's situation report into natural speech. Neither one touches the calendar
+or the database, and neither one decides whether a booking is possible."""
 
+import time as time_module
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel
 from pydantic_ai import Agent, NativeOutput, RunContext
+from pydantic_ai.exceptions import ModelHTTPError
 
 from app.config import settings
 from app.shop import menu_text
+
+RETRYABLE = (429, 503)
+
+
+def run_with_retry(agent: "Agent[Any, Any]", prompt: str, **kwargs: Any) -> Any:
+    """One retry on Gemini's transient errors, then give up loudly."""
+    for attempt in (1, 2):
+        try:
+            return agent.run_sync(prompt, **kwargs)
+        except ModelHTTPError as e:
+            if e.status_code in RETRYABLE and attempt == 1:
+                time_module.sleep(1.5)
+                continue
+            raise
+    raise AssertionError("unreachable")
+
+
+# ---------------------------------------------------------------- converse
 
 
 @dataclass
 class ConverseDeps:
     profile: dict[str, str] = field(default_factory=dict)
     facts: list[str] = field(default_factory=list)
-    availability: str = ""
+    situation: str = ""
 
 
 converse = Agent(settings.llm_model, deps_type=ConverseDeps)
@@ -25,14 +47,17 @@ converse = Agent(settings.llm_model, deps_type=ConverseDeps)
 def converse_instructions(ctx: RunContext[ConverseDeps]) -> str:
     parts = [
         "You are Sarjy, the voice assistant of Sarj Barbershop. "
-        "You are spoken aloud, so keep replies short and natural, one or two sentences. "
-        "Never invent availability; only state what the context below says. "
-        "You cannot make, change, or cancel bookings yet. If asked to book, "
-        "say booking is coming soon and do not pretend a booking happened.",
+        "You are spoken aloud, so keep replies short and natural, one or two sentences, "
+        "plain punctuation only (no dashes, no bullet points). "
+        "The SITUATION below is the ground truth from the booking system. Relay it "
+        "faithfully: never contradict it, never invent availability, and never say a "
+        "booking or cancellation is done unless the SITUATION explicitly says it is done. "
+        "If it says something is not done yet, your reply must not claim it happened. "
+        "If it lists alternatives, offer them.",
         menu_text(),
     ]
-    if ctx.deps.availability:
-        parts.append(f"Availability right now: {ctx.deps.availability}")
+    if ctx.deps.situation:
+        parts.append(f"SITUATION: {ctx.deps.situation}")
     if ctx.deps.profile:
         known = ", ".join(f"{k}: {v}" for k, v in ctx.deps.profile.items())
         parts.append(f"What you know about this customer: {known}")
@@ -41,27 +66,50 @@ def converse_instructions(ctx: RunContext[ConverseDeps]) -> str:
     return "\n\n".join(parts)
 
 
-class MemoryUpdate(BaseModel):
-    """Personal details found in the user's message, all optional."""
+# ---------------------------------------------------------------- extractor
 
+
+class TurnExtract(BaseModel):
+    """Everything machine-readable in one user message."""
+
+    intent: Literal[
+        "booking_info",  # user is providing or changing booking details, or asking to book
+        "confirm",  # user agrees to what was just proposed
+        "deny",  # user rejects what was just proposed
+        "abandon",  # user gives up on the booking in progress
+        "cancel_existing",  # user wants to cancel an already made booking
+        "unrelated",  # anything else: questions, chit chat
+    ]
+    service: Literal["haircut", "beard trim", "haircut and beard", "kids cut"] | None = None
+    barber: Literal["Ali", "Salem"] | None = None
+    day: str | None = None  # ISO date, resolved from relative words using today's date
+    time: str | None = None  # 24h HH:MM
     name: str | None = None
     phone: str | None = None
     preferred_barber: Literal["Ali", "Salem"] | None = None
     facts: list[str] = []
 
 
-memory_extract = Agent(
+extract = Agent(
     settings.llm_model,
-    output_type=NativeOutput(MemoryUpdate),
+    output_type=NativeOutput(TurnExtract),
     instructions=(
-        "Extract personal details from the user's message: their name, phone number, "
-        "preferred barber, and any other durable personal fact worth "
-        "remembering for future visits (preferences, favorites). "
-        "Only set preferred_barber if they explicitly state a preference "
-        "('I prefer Salem', 'Ali is my guy'), never from a question or a one-off booking mention. "
-        "Write facts as short "
-        "third-person statements, e.g. 'favorite color is blue'. "
-        "Do not record anything about the current conversation flow. "
-        "If there is nothing to remember, return all fields empty."
+        "You read one user message in a barbershop booking conversation and fill the schema. "
+        "Only extract what THIS message says or clearly implies given the assistant's last "
+        "question; leave everything else null. Fill service/barber/day/time only when the "
+        "user is stating or changing what they want booked. A QUESTION about a service, "
+        "barber, price, duration, or availability fills nothing and is intent=unrelated "
+        "('how long does a beard trim take?' changes no fields). "
+        "Resolve relative dates (today, tomorrow, "
+        "Friday) to ISO dates using the current date given in the message context. "
+        "Times become 24h HH:MM; assume PM for ambiguous small hours like 'at 5'. "
+        "intent rules: booking_info when they provide or change any booking detail or ask "
+        "to book; confirm/deny only as answers to a proposal; abandon when they call off "
+        "the booking in progress; cancel_existing when they want to cancel or move an "
+        "appointment they already made; unrelated otherwise. "
+        "Memory: set preferred_barber only on an explicit stated preference, never from a "
+        "question or one booking. facts collects durable personal details worth remembering "
+        "for future visits, as short third-person statements like 'favorite color is blue'. "
+        "Leave facts empty for ordinary booking chatter."
     ),
 )
