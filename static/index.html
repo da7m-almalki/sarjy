@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sarj Barbershop</title>
+<style>
+  * { box-sizing: border-box; margin: 0; }
+  body { font-family: system-ui, sans-serif; background: #faf9fc; color: #231f20; }
+  header { padding: 16px 24px; background: #60539d; color: #fff; }
+  header h1 { font-size: 20px; font-weight: 600; }
+  main { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; padding: 24px; max-width: 1200px; margin: 0 auto; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+  #transcript { background: #fff; border: 1px solid #e2ddf0; border-radius: 12px; padding: 16px; height: 420px; overflow-y: auto; }
+  .msg { margin: 8px 0; padding: 10px 14px; border-radius: 10px; max-width: 85%; line-height: 1.4; }
+  .user { background: #60539d; color: #fff; margin-left: auto; }
+  .sarjy { background: #f0edf8; }
+  .hint { color: #8a84a0; font-size: 14px; text-align: center; margin-top: 12px; }
+  #controls { display: flex; align-items: center; gap: 16px; margin-top: 16px; }
+  #mic { width: 64px; height: 64px; border-radius: 50%; border: none; background: #60539d; color: #fff; font-size: 26px; cursor: pointer; }
+  #mic.listening { background: #c0392b; animation: pulse 1.2s infinite; }
+  @keyframes pulse { 50% { transform: scale(1.08); } }
+  #status { color: #6d6785; font-size: 14px; }
+  .calendar { margin-bottom: 16px; }
+  .calendar h2 { font-size: 15px; margin-bottom: 6px; color: #60539d; }
+  iframe { width: 100%; height: 260px; border: 1px solid #e2ddf0; border-radius: 12px; background: #fff; }
+</style>
+</head>
+<body>
+<header><h1>Sarj Barbershop, talk to Sarjy</h1></header>
+<main>
+  <section>
+    <div id="transcript"><p class="hint">Tap the mic and say something like "can I get a haircut today?"</p></div>
+    <div id="controls">
+      <button id="mic" title="Talk">&#127908;</button>
+      <span id="status">Works best in Chrome.</span>
+    </div>
+  </section>
+  <section id="calendars"></section>
+</main>
+<script>
+const deviceId = localStorage.deviceId ||= crypto.randomUUID();
+const transcript = document.getElementById("transcript");
+const mic = document.getElementById("mic");
+const status = document.getElementById("status");
+
+function addMsg(text, who) {
+  const p = document.createElement("p");
+  p.className = "msg " + who;
+  p.textContent = text;
+  transcript.appendChild(p);
+  transcript.scrollTop = transcript.scrollHeight;
+}
+
+async function loadCalendars() {
+  const meta = await (await fetch("/meta")).json();
+  const box = document.getElementById("calendars");
+  for (const [name, calId] of Object.entries(meta.barbers)) {
+    const div = document.createElement("div");
+    div.className = "calendar";
+    const src = "https://calendar.google.com/calendar/embed?mode=WEEK&ctz=Asia%2FRiyadh&src="
+      + encodeURIComponent(calId);
+    div.innerHTML = `<h2>${name}</h2><iframe src="${src}" frameborder="0"></iframe>`;
+    box.appendChild(div);
+  }
+}
+loadCalendars();
+
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+let recognizing = false;
+
+// one reusable element, unlocked during the mic tap; Safari only allows
+// play() started by a user gesture, and swapping src keeps the permission
+const player = new Audio();
+const SILENCE = "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=";
+let audioUnlocked = false;
+
+function unlockAudio() {
+  if (audioUnlocked) return;
+  player.src = SILENCE;
+  player.play().then(() => { audioUnlocked = true; }).catch(() => {});
+}
+
+async function handleUtterance(text) {
+  addMsg(text, "user");
+  status.textContent = "Thinking...";
+  let reply;
+  try {
+    const res = await fetch("/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ device_id: deviceId, text }),
+    });
+    if (!res.ok) throw new Error("chat " + res.status);
+    ({ reply } = await res.json());
+  } catch (err) {
+    status.textContent = "Could not reach Sarjy, try again.";
+    return;
+  }
+  addMsg(reply, "sarjy");
+  status.textContent = "Speaking...";
+  try {
+    player.src = "/tts?text=" + encodeURIComponent(reply);
+    player.onended = () => { status.textContent = ""; };
+    await player.play();
+  } catch (err) {
+    status.textContent = "Voice playback failed, reply shown above.";
+  }
+}
+
+if (!SR || navigator.brave) {
+  // Firefox has no speech recognition; Brave ships the API but blocks results by design
+  status.textContent = "Speech input needs Chrome or Safari.";
+  mic.disabled = true;
+} else {
+  const rec = new SR();
+  rec.lang = "en-US";
+  rec.interimResults = false;
+  rec.onresult = (e) => handleUtterance(e.results[0][0].transcript);
+  rec.onend = () => { recognizing = false; mic.classList.remove("listening"); };
+  rec.onerror = () => { status.textContent = "Did not catch that, try again."; };
+  mic.onclick = () => {
+    unlockAudio();
+    if (recognizing) { rec.stop(); return; }
+    recognizing = true;
+    mic.classList.add("listening");
+    status.textContent = "Listening...";
+    rec.start();
+  };
+}
+</script>
+</body>
+</html>
