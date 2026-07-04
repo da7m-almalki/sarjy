@@ -38,7 +38,7 @@ class Session:
     booking: Booking = field(default_factory=Booking)
     cancel_candidate: dict | None = None
     reschedule_target: dict | None = None  # the old booking row while moving it
-    last_situation: str = ""  # previous turn's situation report, shown to the extractor
+    last_reply: str = ""  # what the assistant actually said last turn, shown to the extractor
     history: list[ModelMessage] = field(default_factory=list)
 
 
@@ -153,8 +153,10 @@ def handle_turn(device_id: str, text: str) -> TurnResult:
         f"Current date and time: {now.strftime('%A %Y-%m-%d %H:%M')} (Riyadh).\n"
         f"Conversation state: {session.state}. Booking so far: {session.booking.summary()}.\n"
     )
-    if session.last_situation:
-        context += f"Previous situation (what the assistant just told them): {session.last_situation}\n"
+    if session.last_reply:
+        # references like "the first one" must resolve against what the customer
+        # actually heard, not against what Python decided behind the scenes
+        context += f"Assistant's last reply (what the customer just heard): {session.last_reply}\n"
     context += f"User message: {text}"
     ext: TurnExtract = run_with_retry(extract, context).output
 
@@ -169,7 +171,6 @@ def handle_turn(device_id: str, text: str) -> TurnResult:
         memory.add_facts(device_id, ext.facts)
 
     situation = _dispatch(session, ext, device_id, profile, now)
-    session.last_situation = situation
 
     deps = ConverseDeps(
         profile=memory.get_profile(device_id),
@@ -178,6 +179,7 @@ def handle_turn(device_id: str, text: str) -> TurnResult:
     )
     result = run_with_retry(converse, text, deps=deps, message_history=session.history)
     session.history = result.all_messages()[-HISTORY_LIMIT:]
+    session.last_reply = result.output
 
     return TurnResult(
         reply=result.output,
