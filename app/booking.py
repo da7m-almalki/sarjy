@@ -12,7 +12,10 @@ from app.shop import BARBERS, CLOSE_TIME, CLOSED_WEEKDAY, OPEN_TIME, SERVICES, T
 BusyLookup = Callable[[str, datetime, datetime], list[tuple[datetime, datetime]]]
 
 SLOT_STEP_MINUTES = 15
-PHONE_RE = re.compile(r"^\+?[0-9][0-9 ]{6,14}$")
+# Saudi mobile, spaces ignored: 05 plus 8 digits, or +9665 plus 8 digits.
+# Strict on purpose: a cut-off transcript like "0501234" must fail here,
+# not slip through and get caught only at the read-back.
+PHONE_RE = re.compile(r"^(?:\+9665|05)[0-9]{8}$")
 
 FIELD_ORDER = ["service", "barber", "day", "start", "name", "phone"]
 
@@ -127,8 +130,11 @@ def validate(booking: Booking, busy_lookup: BusyLookup, now: datetime) -> Proble
     if booking.barber is not None and booking.barber not in BARBERS:
         return Problem(code="UNKNOWN_BARBER", detail=f"Our barbers are {' and '.join(BARBERS)}.")
 
-    if booking.phone is not None and not PHONE_RE.match(booking.phone):
-        return Problem(code="BAD_PHONE", detail="That phone number does not look right.")
+    if booking.phone is not None and not PHONE_RE.match(booking.phone.replace(" ", "")):
+        return Problem(
+            code="BAD_PHONE",
+            detail="That does not look like a full Saudi mobile number (05 and 8 more digits).",
+        )
 
     if booking.day is not None:
         if booking.day < now.date():

@@ -111,6 +111,17 @@ SCENARIOS = [
         ],
         expect=Expect(created=1, created_start="2026-07-05T17:00", created_barber="Salem"),
     ),
+    # ---- a cut-off phone number fails validation, not just the read-back
+    Scenario(
+        name="truncated phone number is rejected",
+        recovery=True,
+        turns=[
+            "khalid, haircut with Ali tomorrow at 5pm, my number is 0501234",
+            "oh sorry, it is 0501234567",
+            "yes book it",
+        ],
+        expect=Expect(created=1, created_start="2026-07-05T17:00", created_barber="Ali"),
+    ),
     # ---- picking an offered alternative by reference, not by restating it
     Scenario(
         name="picks an alternative by reference",
