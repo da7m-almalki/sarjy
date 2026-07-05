@@ -8,7 +8,7 @@ from dataclasses import field as dc_field
 from datetime import datetime
 from pathlib import Path
 
-from app import flow
+from app import flow, memory
 from app.config import settings
 from app.shop import TZ
 
@@ -57,6 +57,7 @@ class Scenario:
     busy: dict | None = None  # pre-seeded busy blocks
     recovery: bool = False  # counts toward the recovery metric
     pre_turns: list[str] = dc_field(default_factory=list)  # setup turns (not counted)
+    pre_bookings: list[dict] = dc_field(default_factory=list)  # booking history in the db
 
 
 def run_scenario(scenario: Scenario, index: int) -> tuple[bool, list[str], FakeCalendar]:
@@ -71,6 +72,8 @@ def run_scenario(scenario: Scenario, index: int) -> tuple[bool, list[str], FakeC
     flow.availability_provider = lambda: "Ali and Salem both have slots free today."
     flow.now_provider = lambda: FROZEN_NOW
     flow._sessions.pop(device, None)
+    for b in scenario.pre_bookings:  # past visits cannot be created by conversation
+        memory.add_booking(device, b["barber"], b["service"], b["start_iso"], "seed-event")
 
     problems: list[str] = []
     replies: list[str] = []

@@ -74,6 +74,17 @@ def add_booking(device_id: str, barber: str, service: str, start_iso: str, event
         )
 
 
+def recent_bookings(device_id: str, limit: int = 3) -> list[dict]:
+    """Newest confirmed bookings first, for resolving 'the usual' and 'last time'."""
+    with _conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM bookings WHERE device_id = ? AND status = 'confirmed' "
+            "ORDER BY start_iso DESC LIMIT ?",
+            (device_id, limit),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def upcoming_bookings(device_id: str, now_iso: str) -> list[dict]:
     with _conn() as conn:
         rows = conn.execute(

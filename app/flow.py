@@ -161,6 +161,14 @@ def handle_turn(device_id: str, text: str) -> TurnResult:
         # references like "the first one" must resolve against what the customer
         # actually heard, not against what Python decided behind the scenes
         context += f"Assistant's last reply (what the customer just heard): {session.last_reply}\n"
+    recent = memory.recent_bookings(device_id)
+    if recent:
+        habits = "; ".join(
+            f"{b['service']} with {b['barber']} on "
+            f"{datetime.fromisoformat(b['start_iso']).strftime('%A %B %-d at %H:%M')}"
+            for b in recent
+        )
+        context += f"Their recent bookings, newest first: {habits}\n"
     context += f"User message: {text}"
     ext: TurnExtract = run_with_retry(extract, context).output
 
