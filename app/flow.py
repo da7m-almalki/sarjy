@@ -55,6 +55,11 @@ def _carries_fields(ext: TurnExtract) -> bool:
     return any([ext.service, ext.barber, ext.day, ext.time, ext.name, ext.phone])
 
 
+def _booking_phrase(b: dict) -> str:
+    start = datetime.fromisoformat(b["start_iso"])
+    return f"{b['service']} with {b['barber']} on {start.strftime('%A %B %-d at %H:%M')}"
+
+
 def _pretty(value: object) -> str:
     if isinstance(value, time):
         return value.strftime("%H:%M")
@@ -163,12 +168,11 @@ def handle_turn(device_id: str, text: str) -> TurnResult:
         context += f"Assistant's last reply (what the customer just heard): {session.last_reply}\n"
     recent = memory.recent_bookings(device_id)
     if recent:
-        habits = "; ".join(
-            f"{b['service']} with {b['barber']} on "
-            f"{datetime.fromisoformat(b['start_iso']).strftime('%A %B %-d at %H:%M')}"
-            for b in recent
+        context += (
+            "Their recent bookings, newest first: "
+            + "; ".join(_booking_phrase(b) for b in recent)
+            + "\n"
         )
-        context += f"Their recent bookings, newest first: {habits}\n"
     context += f"User message: {text}"
     ext: TurnExtract = run_with_retry(extract, context).output
 
@@ -188,16 +192,13 @@ def handle_turn(device_id: str, text: str) -> TurnResult:
     # effect, so a booking made this turn is already in it. Branch situations carry
     # only what happened; facts never route through branches.
     upcoming = memory.upcoming_bookings(device_id, now.isoformat())
-    appointments = "; ".join(
-        f"{b['service']} with {b['barber']} on "
-        f"{datetime.fromisoformat(b['start_iso']).strftime('%A %B %-d at %H:%M')}"
-        for b in upcoming
-    )
+    past = [b for b in recent if datetime.fromisoformat(b["start_iso"]) < now]
     deps = ConverseDeps(
         profile=memory.get_profile(device_id),
         facts=memory.get_facts(device_id),
         availability=availability_provider(),
-        appointments=appointments or "none",
+        appointments="; ".join(_booking_phrase(b) for b in upcoming) or "none",
+        past_visits="; ".join(_booking_phrase(b) for b in past) or "none",
         situation=situation,
     )
     result = run_with_retry(converse, text, deps=deps, message_history=session.history)

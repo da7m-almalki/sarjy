@@ -41,6 +41,7 @@ class ConverseDeps:
     facts: list[str] = field(default_factory=list)
     availability: str = ""  # live, Python-computed, every turn
     appointments: str = ""  # this customer's upcoming bookings, from the database
+    past_visits: str = ""  # what they had before, from the database
     situation: str = ""
 
 
@@ -69,6 +70,8 @@ def converse_instructions(ctx: RunContext[ConverseDeps]) -> str:
         parts.append(f"Live availability right now: {ctx.deps.availability}")
     if ctx.deps.appointments:
         parts.append(f"This customer's upcoming appointments: {ctx.deps.appointments}")
+    if ctx.deps.past_visits:
+        parts.append(f"This customer's past visits, newest first: {ctx.deps.past_visits}")
     if ctx.deps.situation:
         parts.append(f"SITUATION: {ctx.deps.situation}")
     if ctx.deps.profile:
