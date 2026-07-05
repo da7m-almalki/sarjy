@@ -165,4 +165,15 @@ def validate(booking: Booking, busy_lookup: BusyLookup, now: datetime) -> Proble
                     f"at {booking.start.strftime('%H:%M')}.",  # type: ignore[union-attr]
                     alternatives=_alternatives(booking, busy_lookup, now),
                 )
+        elif booking.barber is not None:
+            # no service chosen yet, so the duration is unknown; but if even the
+            # shortest service cannot start here, the slot is taken no matter
+            # what they pick, and they should hear that now, not one turn later
+            shortest = min(s.minutes for s in SERVICES)
+            free = free_slots(booking.barber, booking.day, shortest, busy_lookup, now)  # type: ignore[arg-type]
+            if start not in free:
+                return Problem(
+                    code="SLOT_TAKEN",
+                    detail=f"{booking.barber} is already booked at {start.strftime('%H:%M')}.",
+                )
     return None
