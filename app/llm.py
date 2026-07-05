@@ -37,6 +37,7 @@ def run_with_retry(agent: "Agent[Any, Any]", prompt: str, **kwargs: Any) -> Any:
 
 @dataclass
 class ConverseDeps:
+    now: str = ""  # current date and time, so "tomorrow" has exactly one meaning
     profile: dict[str, str] = field(default_factory=dict)
     facts: list[str] = field(default_factory=list)
     availability: str = ""  # live, Python-computed, every turn
@@ -62,10 +63,14 @@ def converse_instructions(ctx: RunContext[ConverseDeps]) -> str:
         "booking or cancellation is done unless the SITUATION explicitly says it is done. "
         "If it says something is not done yet, your reply must not claim it happened. "
         "If it lists alternatives, offer them. "
+        "The SITUATION has already checked dates, opening hours, and the Friday closure; "
+        "if it says a booking is valid, do not second-guess the date or the day of week. "
         "You can only book, move, or cancel appointments; never promise emails, texts, "
         "callbacks, or anything else you cannot actually do.",
         menu_text(),
     ]
+    if ctx.deps.now:
+        parts.append(f"Current date and time: {ctx.deps.now}.")
     if ctx.deps.availability:
         parts.append(f"Live availability right now: {ctx.deps.availability}")
     if ctx.deps.appointments:
