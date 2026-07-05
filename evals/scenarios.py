@@ -111,6 +111,24 @@ SCENARIOS = [
         ],
         expect=Expect(created=1, created_start="2026-07-05T17:00", created_barber="Salem"),
     ),
+    # ---- a taken slot is called out even before the service (and duration) is known
+    Scenario(
+        name="conflict caught before the service is chosen",
+        recovery=True,
+        busy=_busy({"Salem": [("2026-07-05 12:00", "2026-07-05 12:45")]}),
+        turns=[
+            "can you book me Salem tomorrow at 12pm?",
+            "oh, then make it 3pm, a haircut",
+            "khalid, 0501234567",
+            "yes",
+        ],
+        expect=Expect(
+            created=1,
+            created_start="2026-07-05T15:00",
+            created_barber="Salem",
+            final_state="chatting",
+        ),
+    ),
     # ---- a question probing a specific slot is a tentative proposal
     Scenario(
         name="slot probe question starts the booking",
