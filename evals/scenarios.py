@@ -174,6 +174,27 @@ SCENARIOS = [
         ],
         expect=Expect(created=0, final_state="chatting", booking_discarded=True),
     ),
+    # ---- cross-session memory: "the usual" resolves from booking history
+    Scenario(
+        name="the usual books the remembered service",
+        pre_bookings=[
+            {
+                "barber": "Ali",
+                "service": "haircut and beard",
+                "start_iso": "2026-06-20T17:00:00+03:00",
+            },
+        ],
+        turns=[
+            "hey, it's khalid, 0501234567, book me the usual tomorrow at 5pm",
+            "yes book it",
+        ],
+        expect=Expect(
+            created=1,
+            created_start="2026-07-05T17:00",
+            created_barber="Ali",
+            final_state="chatting",
+        ),
+    ),
     # ---- cancel an existing booking
     Scenario(
         name="cancel existing booking",
