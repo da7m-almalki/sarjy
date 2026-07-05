@@ -194,6 +194,7 @@ def handle_turn(device_id: str, text: str) -> TurnResult:
     upcoming = memory.upcoming_bookings(device_id, now.isoformat())
     past = [b for b in recent if datetime.fromisoformat(b["start_iso"]) < now]
     deps = ConverseDeps(
+        now=f"{now.strftime('%A %Y-%m-%d %H:%M')} (Riyadh)",
         profile=memory.get_profile(device_id),
         facts=memory.get_facts(device_id),
         availability=availability_provider(),
